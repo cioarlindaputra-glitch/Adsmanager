@@ -7,7 +7,7 @@ Backend starter untuk dashboard multi-brand dengan Supabase Auth/Postgres, Meta 
 1. Buat project Supabase dan jalankan `supabase/migrations/001_core.sql` di SQL Editor.
 2. Daftarkan akun pemilik melalui Supabase Auth (Google OAuth dan email/password diaktifkan dari Supabase). Akun baru menjadi `viewer`; setelah itu ubah akun pemilik menjadi admin dengan query komentar di bagian bawah migrasi.
 3. Di Meta for Developers, buat app dan aktifkan Facebook Login serta Marketing API. Tambahkan URL callback persis sebagai OAuth redirect URI: `https://YOUR-RENDER-SERVICE.onrender.com/api/meta/callback`. Minta izin `ads_read`; izin/akses produk dan review Meta dapat diperlukan sebelum akun klien di luar developer app dapat dipakai.
-4. Buat repository GitHub privat untuk aplikasi ini, lalu letakkan isi folder `meta-ads-insight` langsung di root repository (termasuk `render.yaml`). Hubungkan repository itu ke Render dan pilih deploy Blueprint.
+4. Letakkan isi folder aplikasi ini di root repository GitHub yang dipilih (termasuk `render.yaml`), lalu hubungkan repository itu ke Render dan pilih deploy Blueprint.
 5. Isi environment variables di Render dari `.env.example`. Jangan commit file `.env`, service-role key, Meta App Secret, atau token. `META_TOKEN_ENCRYPTION_KEY` harus 64 karakter hex (32 byte), `META_GRAPH_VERSION` harus versi Graph API yang aktif dan tersedia untuk Meta App Anda.
 6. Setelah layanan hidup, buat/ubah brand lewat panel admin dan sambungkan tiap ad account. Scheduled sync harian berjalan dari Render Cron. Endpoint `/api/dashboard?start=YYYY-MM-DD&end=YYYY-MM-DD` dapat dilihat guest.
 
