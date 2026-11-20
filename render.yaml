@@ -1,0 +1,49 @@
+services:
+  - type: web
+    name: leadmarket-meta-ads
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: APP_ORIGIN
+        sync: false
+      - key: META_APP_ID
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: META_GRAPH_VERSION
+        sync: false
+      - key: META_TOKEN_ENCRYPTION_KEY
+        sync: false
+      - key: META_OAUTH_REDIRECT_URI
+        sync: false
+      - key: CRON_SECRET
+        generateValue: true
+  - type: cron
+    name: leadmarket-meta-sync
+    runtime: node
+    schedule: "15 1 * * *"
+    buildCommand: npm install
+    startCommand: npm run sync
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: META_APP_ID
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: META_GRAPH_VERSION
+        sync: false
+      - key: META_TOKEN_ENCRYPTION_KEY
+        sync: false
