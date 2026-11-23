@@ -11,7 +11,7 @@ services:
       - key: NODE_ENV
         value: production
       - key: SUPABASE_URL
-        sync: false
+        value: https://kjgjrgynrsemmgvqkhvb.supabase.co
       - key: SUPABASE_ANON_KEY
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
@@ -40,7 +40,7 @@ services:
     startCommand: npm run sync
     envVars:
       - key: SUPABASE_URL
-        sync: false
+        value: https://kjgjrgynrsemmgvqkhvb.supabase.co
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
       - key: META_APP_ID
