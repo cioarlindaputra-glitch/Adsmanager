@@ -242,7 +242,7 @@ app.post('/api/meta/select', async function (req, res) {
 
 const staticDir = path.resolve(__dirname, '../dist');
 app.use(express.static(staticDir));
-app.get('*', function (req, res) { return res.sendFile(path.join(staticDir, 'index.html')); });
+app.use(function (req, res) { return res.sendFile(path.join(staticDir, 'index.html')); });
 app.use(function (error, req, res, next) {
   console.error(error);
   if (res.headersSent) return next(error);
