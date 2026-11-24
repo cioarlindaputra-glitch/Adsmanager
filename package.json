@@ -3,7 +3,22 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "scripts": { "start": "node server/index.js", "sync": "node scripts/sync-meta.js" },
-  "engines": { "node": ">=20" },
-  "dependencies": { "@supabase/supabase-js": "2.57.0", "express": "5.1.0", "helmet": "8.1.0" }
+  "scripts": {
+    "build": "vite build",
+    "start": "node server/index.js",
+    "sync": "node scripts/sync-meta.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@neon/auth": "^0.8.2",
+    "express": "5.1.0",
+    "helmet": "8.1.0",
+    "jose": "^6.2.18",
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "vite": "^8.3.8"
+  }
 }

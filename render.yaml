@@ -4,17 +4,19 @@ services:
     runtime: node
     plan: free
     region: singapore
-    buildCommand: npm install
+    buildCommand: npm ci && npm run build
     startCommand: npm start
     healthCheckPath: /api/health
     envVars:
       - key: NODE_ENV
         value: production
-      - key: SUPABASE_URL
-        value: https://kjgjrgynrsemmgvqkhvb.supabase.co
-      - key: SUPABASE_ANON_KEY
+      - key: NEON_AUTH_BASE_URL
+        value: https://ep-shy-rain-bd5macly.neonauth.c-8.us-east-2.aws.neon.tech/neondb/auth
+      - key: NEON_AUTH_JWKS_URL
+        value: https://ep-shy-rain-bd5macly.neonauth.c-8.us-east-2.aws.neon.tech/neondb/auth/.well-known/jwks.json
+      - key: DATABASE_URL
         sync: false
-      - key: SUPABASE_SERVICE_ROLE_KEY
+      - key: ADMIN_EMAIL
         sync: false
       - key: APP_ORIGIN
         sync: false
@@ -27,27 +29,4 @@ services:
       - key: META_TOKEN_ENCRYPTION_KEY
         sync: false
       - key: META_OAUTH_REDIRECT_URI
-        sync: false
-      - key: CRON_SECRET
-        generateValue: true
-  - type: cron
-    name: leadmarket-meta-sync
-    runtime: node
-    plan: 0.5c-512mb
-    region: singapore
-    schedule: "15 1 * * *"
-    buildCommand: npm install
-    startCommand: npm run sync
-    envVars:
-      - key: SUPABASE_URL
-        value: https://kjgjrgynrsemmgvqkhvb.supabase.co
-      - key: SUPABASE_SERVICE_ROLE_KEY
-        sync: false
-      - key: META_APP_ID
-        sync: false
-      - key: META_APP_SECRET
-        sync: false
-      - key: META_GRAPH_VERSION
-        sync: false
-      - key: META_TOKEN_ENCRYPTION_KEY
         sync: false

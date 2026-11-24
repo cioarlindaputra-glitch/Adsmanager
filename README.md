@@ -1,28 +1,39 @@
 # LeadMarket Meta Ads Insight
 
-Backend starter untuk dashboard multi-brand dengan Supabase Auth/Postgres, Meta Marketing API read-only, dan Render web + scheduled sync. Dashboard publik hanya membaca ringkasan yang sudah disanitasi; manajemen brand dan koneksi memerlukan admin.
+Dashboard multi-brand untuk melihat spend, klik, CTR, perbandingan periode, dan koneksi akun Meta. Guest dapat melihat ringkasan; pengelolaan brand dan koneksi Meta memerlukan admin.
 
-## Sebelum deploy
+## Stack
 
-1. Buat project Supabase dan jalankan `supabase/migrations/001_core.sql` di SQL Editor.
-2. Daftarkan akun pemilik melalui Supabase Auth (Google OAuth dan email/password diaktifkan dari Supabase). Akun baru menjadi `viewer`; setelah itu ubah akun pemilik menjadi admin dengan query komentar di bagian bawah migrasi.
-3. Di Meta for Developers, buat app dan aktifkan Facebook Login serta Marketing API. Tambahkan URL callback persis sebagai OAuth redirect URI: `https://YOUR-RENDER-SERVICE.onrender.com/api/meta/callback`. Minta izin `ads_read`; izin/akses produk dan review Meta dapat diperlukan sebelum akun klien di luar developer app dapat dipakai.
-4. Letakkan isi folder aplikasi ini di root repository GitHub yang dipilih (termasuk `render.yaml`), lalu hubungkan repository itu ke Render dan pilih deploy Blueprint.
-5. Isi environment variables di Render dari `.env.example`. Jangan commit file `.env`, service-role key, Meta App Secret, atau token. `META_TOKEN_ENCRYPTION_KEY` harus 64 karakter hex (32 byte), `META_GRAPH_VERSION` harus versi Graph API yang aktif dan tersedia untuk Meta App Anda.
-6. Setelah layanan hidup, buat/ubah brand lewat panel admin dan sambungkan tiap ad account. Scheduled sync harian berjalan dari Render Cron. Endpoint `/api/dashboard?start=YYYY-MM-DD&end=YYYY-MM-DD` dapat dilihat guest.
+- Frontend: HTML/CSS/JavaScript dengan Vite.
+- Auth: Neon Managed Better Auth, email/password dan Google.
+- Database: Neon Postgres.
+- Hosting: Render Web Service.
 
-## Auth dan data
+## Neon
 
-- Google login, email/password, dan nomor telepon/password ditangani Supabase Auth. Provider/OTP dan redirect domain diatur di Supabase Dashboard.
-- Setiap user baru bukan admin sampai dipromosikan secara manual.
-- Token Meta dienkripsi AES-256-GCM sebelum disimpan. Hak baca laporan memakai `ads_read`; app tidak mengubah campaign.
-- CTR = link clicks ÷ impressions. Website visitors dikirim `null` dengan catatan sampai GA4 dipasang; clicks Meta tidak dianggap sama dengan pengunjung website.
-- Instagram organic insights belum diambil oleh sync ini. Diperlukan akun Instagram Professional dan izin/endpoint tambahan.
+1. Aktifkan Neon Auth pada branch yang digunakan aplikasi.
+2. Jalankan neon/migrations/001_core.sql pada database yang sama. File ini sudah diterapkan pada project Neon Ads Manager.
+3. Buat role aplikasi dengan akses read_write hanya pada schema public.
+4. Atur DATABASE_URL, NEON_AUTH_BASE_URL, dan NEON_AUTH_JWKS_URL sebagai environment variables pada server.
+5. Set ADMIN_EMAIL ke alamat email yang digunakan pemilik dashboard. Email ini akan mendapat role admin pada login pertama.
+
+Google OAuth shared milik Neon disediakan untuk development. Untuk penggunaan production, daftarkan OAuth client Google sendiri dan atur callback/domain sesuai Neon Auth. Neon Auth saat ini tidak menyediakan login langsung dengan nomor telepon; gunakan email/password atau Google.
+
+## Render
+
+Blueprint hanya membuat Web Service di paket Free. Isi environment variables dari .env.example pada Render. Render memberi URL layanan setelah service dibuat; masukkan URL tersebut sebagai APP_ORIGIN, domain terpercaya Neon Auth, dan callback Meta.
+
+Render Free dapat menghentikan service saat tidak aktif. Untuk data Meta yang selalu baru, jalankan npm run sync terjadwal dari runner lain atau tambahkan Render Cron berbayar. Meta App harus dibuat dan dikonfigurasi terlebih dahulu.
+
+## Meta Ads
+
+1. Buat Meta App dan aktifkan Facebook Login serta Marketing API.
+2. Tambahkan callback persis: https://<render-service>.onrender.com/api/meta/callback.
+3. Atur META_APP_ID, META_APP_SECRET, META_GRAPH_VERSION, META_TOKEN_ENCRYPTION_KEY (64 digit hex), dan META_OAUTH_REDIRECT_URI di Render.
+4. Masuk admin, buat brand, pilih Sambungkan Meta, beri izin ads_read, lalu pilih ad account.
+
+Token iklan disimpan terenkripsi AES-256-GCM di server. Jangan simpan connection string, token Meta, atau app secret di GitHub.
 
 ## Lokal
 
-```sh
-cp .env.example .env
-npm install
-npm start
-```
+Salin .env.example menjadi .env, jalankan npm install, npm run build, lalu npm start.
