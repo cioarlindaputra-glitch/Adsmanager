@@ -151,7 +151,7 @@ function editBrand(id) {
 }
 function login() {
   let mode = 'signin';
-  const html = '<div class="authchoice"><button class="btn" id="googleLogin">Lanjutkan dengan Google</button></div><div style="text-align:center;color:#758296;font-size:11px">atau masuk dengan email dan password</div><div class="field"><label>Email</label><input id="email" type="email" placeholder="nama@perusahaan.com" autocomplete="email"></div><div class="field"><label>Password</label><input id="password" type="password" autocomplete="current-password"></div><div class="modal-actions"><button class="btn primary" id="modalSubmit">Masuk</button></div><button class="linkbtn" id="switchAuth" type="button">Belum punya akun? Buat akun</button><div class="footnote">Neon Auth mendukung email/password dan Google. Login nomor telepon belum tersedia.</div>';
+  const html = '<div class="authchoice"><button class="btn" id="googleLogin">Lanjutkan dengan Google</button></div><div style="text-align:center;color:#758296;font-size:11px">atau masuk dengan email dan password</div><div class="field"><label>Email</label><input id="email" type="email" placeholder="nama@perusahaan.com" autocomplete="email"></div><div class="field"><label>Password</label><input id="password" type="password" autocomplete="current-password"></div><div class="modal-actions"><button class="btn primary" id="modalSubmit">Masuk</button></div><button class="linkbtn" id="forgotPassword" type="button">Lupa password?</button><button class="linkbtn" id="switchAuth" type="button">Belum punya akun? Buat akun</button><div class="footnote">Neon Auth mendukung email/password dan Google. Login nomor telepon belum tersedia.</div>';
   modal('Masuk sebagai admin', 'Autentikasi dan sesi dikelola oleh Neon.', html, async function () {
     const email = $('#email').value.trim(), password = $('#password').value;
     if (!email || !password) return toast('Isi email dan password.');
@@ -171,12 +171,53 @@ function login() {
       if (result && result.error) toast(result.error.message || 'Google login gagal.');
     } catch (error) { toast(error.message || 'Google login gagal.'); }
   };
+  $('#forgotPassword').onclick = function () { showForgotPassword($('#email').value.trim()); };
   $('#switchAuth').onclick = function () {
     mode = mode === 'signin' ? 'signup' : 'signin';
     $('#modalTitle').textContent = mode === 'signup' ? 'Buat akun admin' : 'Masuk sebagai admin';
     $('#modalSubmit').textContent = mode === 'signup' ? 'Buat akun' : 'Masuk';
     $('#switchAuth').textContent = mode === 'signup' ? 'Sudah punya akun? Masuk' : 'Belum punya akun? Buat akun';
   };
+}
+
+function showForgotPassword(email) {
+  const html = '<div class="field"><label>Email akun</label><input id="resetEmail" type="email" placeholder="nama@perusahaan.com" autocomplete="email" value="' + esc(email) + '"></div><div class="modal-actions"><button class="btn" id="backToLogin" type="button">Kembali</button><button class="btn primary" id="modalSubmit">Kirim link reset</button></div><div class="footnote">Jika email terdaftar, link untuk membuat password baru akan dikirim ke inbox Anda.</div>';
+  modal('Lupa password', 'Masukkan email yang digunakan untuk akun dashboard.', html, async function () {
+    const address = $('#resetEmail').value.trim();
+    if (!address) return toast('Isi email akun Anda.');
+    try {
+      const result = await authClient.requestPasswordReset({ email: address, redirectTo: location.origin + '/?resetPassword=1' });
+      if (result.error) throw Error(result.error.message || 'Link reset gagal dikirim.');
+      toast('Jika email terdaftar, link reset sudah dikirim. Periksa inbox dan folder spam.');
+      closeModal();
+    } catch (error) { toast(error.message || 'Link reset gagal dikirim.'); }
+  });
+  $('#backToLogin').onclick = login;
+}
+
+function handlePasswordResetLink() {
+  const params = new URLSearchParams(location.search);
+  const token = params.get('token');
+  if (!token && params.get('error')) {
+    history.replaceState(null, document.title, location.pathname);
+    toast('Link reset tidak valid atau sudah kedaluwarsa. Minta link baru.');
+    return;
+  }
+  if (!token) return;
+  history.replaceState(null, document.title, location.pathname);
+  const html = '<div class="field"><label>Password baru</label><input id="newPassword" type="password" autocomplete="new-password"></div><div class="field"><label>Ulangi password baru</label><input id="confirmPassword" type="password" autocomplete="new-password"></div><div class="modal-actions"><button class="btn primary" id="modalSubmit">Simpan password baru</button></div>';
+  modal('Buat password baru', 'Pilih password baru untuk akun dashboard Anda.', html, async function () {
+    const password = $('#newPassword').value;
+    if (password.length < 8) return toast('Password minimal 8 karakter.');
+    if (password !== $('#confirmPassword').value) return toast('Konfirmasi password belum sama.');
+    try {
+      const result = await authClient.resetPassword({ newPassword: password, token: token });
+      if (result.error) throw Error(result.error.message || 'Password gagal diperbarui.');
+      closeModal();
+      toast('Password berhasil diperbarui. Silakan masuk.');
+      login();
+    } catch (error) { toast(error.message || 'Password gagal diperbarui.'); }
+  });
 }
 
 $('#loginBtn').onclick = login;
@@ -209,6 +250,7 @@ async function init() {
     if (badge) badge.textContent = '● NEON · META INSIGHT';
     await refreshAuth();
     await load();
+    handlePasswordResetLink();
   } catch (error) { toast(error.message); }
 }
 init();
