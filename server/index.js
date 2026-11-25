@@ -42,7 +42,7 @@ function encrypt(value) {
 async function currentUser(req) {
   const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   if (!token || !jwks) return null;
-  const result = await jwtVerify(token, jwks, { issuer: process.env.NEON_AUTH_BASE_URL, algorithms: ['EdDSA'] });
+  const result = await jwtVerify(token, jwks, { issuer: new URL(process.env.NEON_AUTH_BASE_URL).origin, algorithms: ['EdDSA'] });
   const payload = result.payload;
   if (!payload.sub) return null;
   return { id: String(payload.sub), email: typeof payload.email === 'string' ? payload.email : null, name: typeof payload.name === 'string' ? payload.name : null };
