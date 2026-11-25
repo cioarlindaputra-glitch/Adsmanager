@@ -79,6 +79,47 @@ async function graphGet(url, params) {
   return data;
 }
 
+let nextMetaSyncAt = 0;
+function decrypt(value) {
+  const parts = String(value || '').split('.');
+  if (!tokenKey || parts.length !== 3) throw Error('Meta token encryption data is invalid');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', tokenKey, Buffer.from(parts[0], 'base64url'));
+  decipher.setAuthTag(Buffer.from(parts[1], 'base64url'));
+  return Buffer.concat([decipher.update(Buffer.from(parts[2], 'base64url')), decipher.final()]).toString('utf8');
+}
+async function syncStaleMetaConnections() {
+  if (!pool || !tokenKey || Date.now() < nextMetaSyncAt) return;
+  nextMetaSyncAt = Date.now() + 15 * 60 * 1000;
+  const result = await pool.query("SELECT id,brand_id,ad_account_id,encrypted_access_token FROM public.meta_connections WHERE last_synced_at IS NULL OR last_synced_at < now()-interval '15 minutes'");
+  const until = new Date().toISOString().slice(0, 10);
+  const since = new Date(Date.now() - 89 * 86400000).toISOString().slice(0, 10);
+  for (const connection of result.rows) {
+    try {
+      const accessToken = decrypt(connection.encrypted_access_token);
+      let url = new URL('https://graph.facebook.com/' + graph + '/' + connection.ad_account_id + '/insights');
+      url.searchParams.set('fields', 'date_start,spend,impressions,inline_link_clicks,reach,actions');
+      url.searchParams.set('time_range', JSON.stringify({ since: since, until: until }));
+      url.searchParams.set('time_increment', '1');
+      url.searchParams.set('limit', '500');
+      url.searchParams.set('access_token', accessToken);
+      while (url) {
+        const body = await graphGet(url.toString());
+        for (const metric of body.data || []) {
+          await pool.query(
+            'INSERT INTO public.daily_metrics (brand_id,connection_id,day,spend,impressions,link_clicks,reach,inline_link_clicks,raw_actions,fetched_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,now()) ON CONFLICT (connection_id,day) DO UPDATE SET spend=EXCLUDED.spend,impressions=EXCLUDED.impressions,link_clicks=EXCLUDED.link_clicks,reach=EXCLUDED.reach,inline_link_clicks=EXCLUDED.inline_link_clicks,raw_actions=EXCLUDED.raw_actions,fetched_at=now()',
+            [connection.brand_id, connection.id, metric.date_start, Number(metric.spend || 0), Number(metric.impressions || 0), Number(metric.inline_link_clicks || 0), Number(metric.reach || 0), Number(metric.inline_link_clicks || 0), JSON.stringify(metric.actions || [])]
+          );
+        }
+        url = body.paging && body.paging.next ? new URL(body.paging.next) : null;
+      }
+      await pool.query('UPDATE public.meta_connections SET last_synced_at=now() WHERE id=$1', [connection.id]);
+      console.log('Synced Meta insights for ' + connection.ad_account_id);
+    } catch (error) {
+      console.error('Meta insights sync failed for ' + connection.ad_account_id + ':', error.message);
+    }
+  }
+}
+
 app.get('/api/health', async function (req, res) {
   let database = false;
   if (pool) {
@@ -114,6 +155,10 @@ app.get('/api/brands', async function (req, res) {
 app.get('/api/dashboard', async function (req, res) {
   try {
     if (!pool) return json(res, 503, { error: 'Database Neon belum dikonfigurasi' });
+    try {
+      const user = await currentUser(req);
+      if (user && (await ensureProfile(user)).role === 'admin') await syncStaleMetaConnections();
+    } catch (syncError) { console.error('Dashboard Meta sync check failed:', syncError.message); }
     const start = req.query.start, end = req.query.end;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(start || '') || !/^\d{4}-\d{2}-\d{2}$/.test(end || '') || start > end)
       return json(res, 400, { error: 'start dan end harus tanggal YYYY-MM-DD yang valid' });
