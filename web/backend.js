@@ -2,7 +2,7 @@ import { createAuthClient } from '@neon/auth';
 
 const $ = function (s) { return document.querySelector(s); };
 const $$ = function (s) { return Array.from(document.querySelectorAll(s)); };
-let config, authClient, accessToken = '', isAdmin = false, brands = [], period = 'weekly';
+let config, authClient, accessToken = '', isAdmin = false, brands = [], period = 'monthly';
 const fmt = function (n) { return 'Rp ' + Math.round(Number(n) || 0).toLocaleString('id-ID'); };
 const esc = function (s) { return String(s ?? '').replace(/[&<>"']/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]; }); };
 function toast(message) {
@@ -54,6 +54,8 @@ function updateAccess() {
   });
   if (!isAdmin && $('.page.active') && $('.page.active').id !== 'page-dashboard') navigate('dashboard');
   $('#adminbar').classList.toggle('visible', isAdmin);
+  const dashboardFilters = $('#dashboardFilters');
+  if (dashboardFilters) dashboardFilters.style.display = isAdmin ? '' : 'none';
   $('#loginBtn').style.display = isAdmin ? 'none' : '';
   $('#logoutBtn').style.display = accessToken ? '' : 'none';
   renderBrands();
@@ -72,8 +74,11 @@ async function load() {
     renderBrands();
     const now = new Date();
     const end = now.toISOString().slice(0, 10);
-    const days = period === 'daily' ? 1 : period === 'monthly' ? 30 : 7;
-    const start = new Date(now.getTime() - (days - 1) * 864e5).toISOString().slice(0, 10);
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const days = period === 'daily' ? 1 : 7;
+    const start = period === 'monthly'
+      ? monthStart.toISOString().slice(0, 10)
+      : new Date(now.getTime() - (days - 1) * 864e5).toISOString().slice(0, 10);
     const query = new URLSearchParams({ start: start, end: end });
     const dashboard = await api('/api/dashboard?' + query.toString());
     renderDashboard(dashboard);
@@ -100,7 +105,7 @@ function renderDashboard(data) {
     return '<article class="stat"><div class="stathead">' + card[0] + '<span class="stat-icon">' + card[2] + '</span></div><div class="value">' + card[1] + '</div><div class="delta neutral">' + card[3] + '</div></article>';
   }).join('');
   $('#rangeLabel').textContent = data.start + ' – ' + data.end + ' · dibanding ' + data.previousStart + ' – ' + data.previousEnd;
-  $('#chartPeriod').textContent = period === 'daily' ? 'Hari ini' : period === 'monthly' ? '30 hari terakhir' : '7 hari terakhir';
+  $('#chartPeriod').textContent = period === 'daily' ? 'Hari ini' : period === 'monthly' ? 'Bulan ini' : '7 hari terakhir';
   $('#brandRows').innerHTML = (data.brands || []).map(function (brand) {
     const visitor = brand.website_visitors === null ? '—' : Number(brand.website_visitors).toLocaleString('id-ID');
     return '<tr><td><div class="brand-cell"><span class="branddot">' + esc(brand.short_name || brand.name.slice(0, 2)) + '</span>' + esc(brand.name) + '</div></td><td>' + fmt(brand.spend) + '</td><td>' + Number(brand.clicks || 0).toLocaleString('id-ID') + '</td><td>' + Number(brand.ctr || 0).toFixed(2) + '%</td><td>' + visitor + '</td><td>' + deltaLabel(brand.ctr_change_pct) + '</td><td><span class="status ' + (brand.connected ? 'live' : 'attn') + '">' + (brand.connected ? 'Terhubung' : 'Belum terhubung') + '</span></td></tr>';
