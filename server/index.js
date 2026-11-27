@@ -418,7 +418,7 @@ app.get('/api/meta/callback', async function (req, res) {
     if (state.integration === 'instagram_unified') {
       try {
         const tokenData = await graphGet('https://graph.facebook.com/' + graph + '/oauth/access_token', {
-          client_id: process.env.META_APP_ID, client_secret: process.env.META_APP_SECRET, code: String(req.query.code)
+          client_id: process.env.META_APP_ID, client_secret: process.env.META_APP_SECRET, redirect_uri: process.env.META_OAUTH_REDIRECT_URI, code: String(req.query.code)
         });
         if (!tokenData.access_token) throw Error('Meta tidak mengembalikan access token.');
         const token = tokenData.access_token;
