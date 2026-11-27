@@ -85,6 +85,33 @@ async function graphGet(url, params) {
   if (!response.ok) throw Error((data && data.error && data.error.message) || ('Meta API error ' + response.status));
   return data;
 }
+async function instagramTokenPost(fields) {
+  const body = new URLSearchParams();
+  Object.entries(fields).forEach(function (pair) { body.set(pair[0], String(pair[1])); });
+  const response = await fetch('https://api.instagram.com/oauth/access_token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body });
+  const data = await response.json();
+  if (!response.ok) throw Error((data && (data.error_message || data.error_description || data.message)) || ('Instagram token exchange gagal (' + response.status + ')'));
+  return Array.isArray(data.data) ? data.data[0] : data;
+}
+async function completeInstagramDirectOAuth(state, code) {
+  const appId = process.env.INSTAGRAM_APP_ID;
+  const appSecret = process.env.INSTAGRAM_APP_SECRET;
+  const redirectUri = process.env.META_OAUTH_REDIRECT_URI;
+  const shortToken = await instagramTokenPost({ client_id: appId, client_secret: appSecret, grant_type: 'authorization_code', redirect_uri: redirectUri, code: code });
+  if (!shortToken || !shortToken.access_token) throw Error('Instagram tidak mengembalikan access token.');
+  const longToken = await graphGet('https://graph.instagram.com/access_token', { grant_type: 'ig_exchange_token', client_secret: appSecret, access_token: shortToken.access_token });
+  const accessToken = longToken.access_token || shortToken.access_token;
+  const profile = await graphGet('https://graph.instagram.com/' + graph + '/me', { fields: 'id,username,account_type', access_token: accessToken });
+  const igUserId = String(profile.id || shortToken.user_id || '');
+  if (!igUserId) throw Error('ID akun Instagram tidak ditemukan.');
+  const expires = longToken.expires_in ? new Date(Date.now() + Number(longToken.expires_in) * 1000).toISOString() : null;
+  await pool.query(
+    "INSERT INTO public.instagram_connections (brand_id,social_brand_id,ig_user_id,ig_username,page_id,page_name,encrypted_access_token,token_expires_at,connected_by,auth_provider) VALUES (NULL,$1,$2,$3,'','',$4,$5,$6,'instagram') ON CONFLICT (social_brand_id,ig_user_id) DO UPDATE SET ig_username=EXCLUDED.ig_username,page_id='',page_name='',encrypted_access_token=EXCLUDED.encrypted_access_token,token_expires_at=EXCLUDED.token_expires_at,connected_by=EXCLUDED.connected_by,auth_provider='instagram',last_synced_at=NULL",
+    [state.socialBrandId, igUserId, String(profile.username || igUserId), encrypt(accessToken), expires, state.userId]
+  );
+  const origin = String(process.env.APP_ORIGIN || '/').replace(/&/g, '&amp;').replace(/\"/g, '&quot;');
+  return '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Instagram tersambung</title><style>body{font:16px system-ui;background:#0b1018;color:#eee;max-width:600px;margin:10vh auto;padding:24px}a{color:#c4f36b}</style><h2>Akun Instagram @' + htmlEscape(profile.username || igUserId) + ' berhasil tersambung.</h2><p>Tutup halaman ini atau kembali ke dashboard untuk memuat insight.</p><p><a href="' + origin + '">Kembali ke dashboard</a></p>';
+}
 
 let nextMetaSyncAt = 0;
 function decrypt(value) {
@@ -132,17 +159,24 @@ let nextInstagramSyncAt = 0;
 async function syncInstagramConnections() {
   if (!pool || !tokenKey || Date.now() < nextInstagramSyncAt) return;
   nextInstagramSyncAt = Date.now() + 15 * 60 * 1000;
-  const result = await pool.query("SELECT id,brand_id,ig_user_id,encrypted_access_token FROM public.instagram_connections WHERE last_synced_at IS NULL OR last_synced_at < now()-interval '15 minutes'");
+  const result = await pool.query("SELECT id,brand_id,ig_user_id,encrypted_access_token,auth_provider,token_expires_at FROM public.instagram_connections WHERE last_synced_at IS NULL OR last_synced_at < now()-interval '15 minutes'");
   const untilDate = new Date().toISOString().slice(0, 10);
   const sinceDate = new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
   const since = Math.floor(Date.parse(sinceDate + 'T00:00:00Z') / 1000);
   const until = Math.floor(Date.parse(untilDate + 'T00:00:00Z') / 1000) + 86400;
   for (const connection of result.rows) {
     try {
-      const accessToken = decrypt(connection.encrypted_access_token);
+      let accessToken = decrypt(connection.encrypted_access_token);
+      if (connection.auth_provider === 'instagram' && connection.token_expires_at && new Date(connection.token_expires_at).getTime() < Date.now() + 14 * 86400000) {
+        const refreshed = await graphGet('https://graph.instagram.com/refresh_access_token', { grant_type: 'ig_refresh_token', access_token: accessToken });
+        accessToken = refreshed.access_token || accessToken;
+        const expiry = refreshed.expires_in ? new Date(Date.now() + Number(refreshed.expires_in) * 1000).toISOString() : connection.token_expires_at;
+        await pool.query('UPDATE public.instagram_connections SET encrypted_access_token=$1,token_expires_at=$2 WHERE id=$3', [encrypt(accessToken), expiry, connection.id]);
+      }
+      const host = connection.auth_provider === 'instagram' ? 'https://graph.instagram.com/' : 'https://graph.facebook.com/';
       const byDay = new Map();
       for (const metricName of ['reach', 'total_interactions']) {
-        const body = await graphGet('https://graph.facebook.com/' + graph + '/' + connection.ig_user_id + '/insights', {
+        const body = await graphGet(host + graph + '/' + connection.ig_user_id + '/insights', {
           metric: metricName, period: 'day', since: since, until: until, access_token: accessToken
         });
         for (const metric of body.data || []) {
@@ -332,18 +366,20 @@ app.delete('/api/brands/:id', admin, async function (req, res) {
 
 app.get('/api/instagram/connect/:brandId', admin, async function (req, res) {
   try {
-    if (!process.env.META_APP_ID || !process.env.META_APP_SECRET || !graph || !process.env.META_OAUTH_REDIRECT_URI)
-      return json(res, 503, { error: 'Meta App belum dikonfigurasi di Render.' });
+    if (!process.env.INSTAGRAM_APP_ID || !process.env.INSTAGRAM_APP_SECRET || !graph || !process.env.META_OAUTH_REDIRECT_URI)
+      return json(res, 503, { error: 'Login Instagram langsung belum dikonfigurasi. Tambahkan INSTAGRAM_APP_ID dan INSTAGRAM_APP_SECRET dari pengaturan Instagram di Meta App ke Render.' });
     const exists = await pool.query('SELECT 1 FROM public.social_brands WHERE id=$1', [req.params.brandId]);
     if (!exists.rowCount) return json(res, 404, { error: 'Brand sosial tidak ditemukan.' });
     const stateId = crypto.randomBytes(20).toString('hex');
-    const payload = Buffer.from(JSON.stringify({ socialBrandId: req.params.brandId, userId: req.user.id, stateId: stateId, integration: 'instagram', exp: Date.now() + 600000 })).toString('base64url');
+    const payload = Buffer.from(JSON.stringify({ socialBrandId: req.params.brandId, userId: req.user.id, stateId: stateId, integration: 'instagram_direct', exp: Date.now() + 600000 })).toString('base64url');
     const sig = crypto.createHmac('sha256', process.env.META_APP_SECRET).update(payload).digest('base64url');
-    const redirect = new URL('https://www.facebook.com/' + graph + '/dialog/oauth');
-    redirect.searchParams.set('client_id', process.env.META_APP_ID);
+    const redirect = new URL('https://www.instagram.com/oauth/authorize');
+    redirect.searchParams.set('client_id', process.env.INSTAGRAM_APP_ID);
     redirect.searchParams.set('redirect_uri', process.env.META_OAUTH_REDIRECT_URI);
     redirect.searchParams.set('state', payload + '.' + sig);
-    redirect.searchParams.set('scope', 'instagram_basic,instagram_manage_insights,pages_show_list,pages_read_engagement');
+    redirect.searchParams.set('scope', 'instagram_business_basic,instagram_business_manage_insights');
+    redirect.searchParams.set('enable_fb_login', 'false');
+    redirect.searchParams.set('force_reauth', 'true');
     redirect.searchParams.set('response_type', 'code');
     return json(res, 200, { url: redirect.toString() });
   } catch (error) {
@@ -381,6 +417,15 @@ app.get('/api/meta/callback', async function (req, res) {
     if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) return res.status(400).send('State OAuth tidak valid. Silakan mulai lagi.');
     const state = JSON.parse(Buffer.from(payload, 'base64url').toString());
     if (state.exp < Date.now() || !req.query.code) return res.status(400).send('Sesi OAuth kedaluwarsa. Silakan mulai lagi.');
+    if (state.integration === 'instagram_direct') {
+      try {
+        const page = await completeInstagramDirectOAuth(state, String(req.query.code));
+        return res.type('html').send(page);
+      } catch (error) {
+        console.error('Direct Instagram OAuth callback failed:', error.message);
+        return res.status(400).send('Koneksi Instagram langsung gagal. Pastikan Instagram API with Instagram Login dan izin insights sudah aktif di Meta App, lalu coba lagi.');
+      }
+    }
     const tokenData = await graphGet('https://graph.facebook.com/' + graph + '/oauth/access_token', { client_id: process.env.META_APP_ID, client_secret: process.env.META_APP_SECRET, redirect_uri: process.env.META_OAUTH_REDIRECT_URI, code: req.query.code });
     let token = tokenData.access_token;
     let expires = tokenData.expires_in ? new Date(Date.now() + tokenData.expires_in * 1000).toISOString() : null;
