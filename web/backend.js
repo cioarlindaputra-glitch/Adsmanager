@@ -82,7 +82,15 @@ async function load() {
     const query = new URLSearchParams({ start: start, end: end });
     const dashboard = await api('/api/dashboard?' + query.toString());
     renderDashboard(dashboard);
-    renderSocial();
+    const socialNow = new Date();
+    const socialEnd = socialNow.toISOString().slice(0, 10);
+    const socialPeriod = $('#socialPeriod') ? $('#socialPeriod').value : 'month';
+    const socialStart = socialPeriod === 'month'
+      ? new Date(Date.UTC(socialNow.getUTCFullYear(), socialNow.getUTCMonth(), 1)).toISOString().slice(0, 10)
+      : new Date(socialNow.getTime() - (Number(socialPeriod || 30) - 1) * 864e5).toISOString().slice(0, 10);
+    const socialQuery = new URLSearchParams({ start: socialStart, end: socialEnd });
+    const social = await api('/api/social?' + socialQuery.toString());
+    renderSocial(social);
   } catch (error) { toast(error.message); }
 }
 function deltaLabel(value) {
@@ -131,12 +139,18 @@ function renderBrands() {
   $$('.edit-brand').forEach(function (button) { button.onclick = function () { editBrand(button.dataset.id); }; });
   $$('.remove').forEach(function (button) { button.onclick = async function () { if (confirm('Hapus brand ini dan seluruh data terkait?')) { try { await api('/api/brands/' + button.dataset.id, { method: 'DELETE' }); await load(); } catch (error) { toast(error.message); } } }; });
 }
-function renderSocial() {
-  const selected = brands.slice(0, 4);
+function renderSocial(data) {
+  const selected = data && data.brands || [];
+  function metric(value) { return value === null || value === undefined ? '—' : Number(value).toLocaleString('id-ID'); }
+  function engagement(value) { return value === null || value === undefined ? '—' : Number(value).toFixed(2) + '%'; }
   $('#socialCards').innerHTML = selected.map(function (brand) {
-    return '<div class="social-card"><div class="socialbrand"><span class="socialicon">◎</span>' + esc(brand.name) + '</div><div class="socialnumbers"><div><b>—</b><small>Reach</small></div><div><b>—</b><small>Interaksi</small></div><div><b>—</b><small>Engagement</small></div></div><div class="connectbar"><span class="status attn">Belum tersedia</span><span class="muted">Instagram</span></div></div>';
+    const status = brand.connected ? '<span class="status live">Terhubung</span>' : '<span class="status attn">Belum terhubung</span>';
+    return '<div class="social-card"><div class="socialbrand"><span class="socialicon">◎</span>' + esc(brand.name) + '</div><div class="socialnumbers"><div><b>' + metric(brand.reach) + '</b><small>Jangkauan</small></div><div><b>' + metric(brand.interactions) + '</b><small>Interaksi</small></div><div><b>' + engagement(brand.engagement_pct) + '</b><small>Engagement</small></div></div><div class="connectbar">' + status + '<span class="muted">' + (brand.instagram_username ? '@' + esc(brand.instagram_username) : 'Instagram') + '</span></div></div>';
+  }).join('') || '<div class="social-card">Belum ada brand.</div>';
+  $('#socialRows').innerHTML = selected.map(function (brand) {
+    const status = brand.connected ? '<span class="status live">Terhubung</span>' : '<span class="status attn">Belum terhubung</span>';
+    return '<tr><td>' + esc(brand.name) + '</td><td>Instagram</td><td>' + metric(brand.reach) + '</td><td>' + metric(brand.interactions) + '</td><td>' + engagement(brand.engagement_pct) + '</td><td>' + status + '</td></tr>';
   }).join('');
-  $('#socialRows').innerHTML = selected.map(function (brand) { return '<tr><td>' + esc(brand.name) + '</td><td>Instagram</td><td>—</td><td>—</td><td>—</td><td><span class="status attn">Belum terhubung</span></td></tr>'; }).join('');
 }
 function modal(title, description, html, submit) {
   $('#modalTitle').textContent = title;
@@ -235,6 +249,7 @@ $('#logoutBtn').onclick = async function () {
 $$('.nav button').forEach(function (button) { button.onclick = function () { navigate(button.dataset.page); }; });
 $$('[data-goto]').forEach(function (button) { button.onclick = function () { navigate(button.dataset.goto); }; });
 $('#period').onchange = function (event) { period = event.target.value; load(); };
+$('#socialPeriod').onchange = function () { load(); };
 $('#brandSearch').oninput = renderBrands;
 $('#hamb').onclick = function () { $('#sidebar').classList.toggle('open'); };
 $('#addBrand').onclick = function () {
@@ -244,7 +259,18 @@ $('#addBrand').onclick = function () {
   });
   $('#cancel').onclick = closeModal;
 };
-$('#connectInstagram').onclick = function () { toast('Instagram Insights belum diaktifkan pada backend ini.'); };
+$('#connectInstagram').onclick = function () {
+  if (!isAdmin) return toast('Login admin diperlukan');
+  const options = brands.map(function (brand) { return '<option value="' + esc(brand.id) + '">' + esc(brand.name) + '</option>'; }).join('');
+  if (!options) return toast('Tambahkan brand terlebih dahulu.');
+  modal('Sambungkan Instagram', 'Pilih brand yang akan ditautkan ke akun Instagram Professional.', '<div class="field"><label>Brand</label><select id="instagramBrand" class="select" style="width:100%">' + options + '</select></div><div class="modal-actions"><button class="btn" id="cancelInstagram">Batal</button><button class="btn primary" id="modalSubmit">Lanjut ke Meta</button></div><div class="footnote">Gunakan akun Instagram Professional yang terhubung ke Facebook Page dan berikan izin yang diminta.</div>', async function () {
+    try {
+      const result = await api('/api/instagram/connect/' + encodeURIComponent($('#instagramBrand').value));
+      location.href = result.url;
+    } catch (error) { toast(error.message || 'Koneksi Instagram gagal.'); }
+  });
+  $('#cancelInstagram').onclick = closeModal;
+};
 $('#exportBtn').onclick = function () { toast('Ekspor laporan akan tersedia setelah integrasi dashboard lengkap.'); };
 async function init() {
   try {
