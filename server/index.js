@@ -32,6 +32,13 @@ app.use(function (req, res, next) {
 });
 
 const json = function (res, status, data) { return res.status(status).json(data); };
+
+function htmlEscape(value) {
+  return String(value ?? '').replace(/[&<>"']/g, function (char) {
+    return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char];
+  });
+}
+
 function encrypt(value) {
   if (!tokenKey) throw Error('Meta token encryption is not configured');
   const iv = crypto.randomBytes(12);
@@ -120,6 +127,47 @@ async function syncStaleMetaConnections() {
   }
 }
 
+
+let nextInstagramSyncAt = 0;
+async function syncInstagramConnections() {
+  if (!pool || !tokenKey || Date.now() < nextInstagramSyncAt) return;
+  nextInstagramSyncAt = Date.now() + 15 * 60 * 1000;
+  const result = await pool.query("SELECT id,brand_id,ig_user_id,encrypted_access_token FROM public.instagram_connections WHERE last_synced_at IS NULL OR last_synced_at < now()-interval '15 minutes'");
+  const untilDate = new Date().toISOString().slice(0, 10);
+  const sinceDate = new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
+  const since = Math.floor(Date.parse(sinceDate + 'T00:00:00Z') / 1000);
+  const until = Math.floor(Date.parse(untilDate + 'T00:00:00Z') / 1000) + 86400;
+  for (const connection of result.rows) {
+    try {
+      const accessToken = decrypt(connection.encrypted_access_token);
+      const byDay = new Map();
+      for (const metricName of ['reach', 'total_interactions']) {
+        const body = await graphGet('https://graph.facebook.com/' + graph + '/' + connection.ig_user_id + '/insights', {
+          metric: metricName, period: 'day', since: since, until: until, access_token: accessToken
+        });
+        for (const metric of body.data || []) {
+          const column = metric.name === 'reach' ? 'reach' : 'interactions';
+          for (const point of metric.values || []) {
+            const day = point.end_time ? new Date(point.end_time).toISOString().slice(0, 10) : untilDate;
+            if (!byDay.has(day)) byDay.set(day, { reach: 0, interactions: 0 });
+            byDay.get(day)[column] = Number(point.value || 0);
+          }
+        }
+      }
+      for (const [day, values] of byDay) {
+        await pool.query(
+          'INSERT INTO public.instagram_daily_metrics (brand_id,connection_id,day,reach,interactions,fetched_at) VALUES ($1,$2,$3,$4,$5,now()) ON CONFLICT (connection_id,day) DO UPDATE SET reach=EXCLUDED.reach,interactions=EXCLUDED.interactions,fetched_at=now()',
+          [connection.brand_id, connection.id, day, values.reach, values.interactions]
+        );
+      }
+      await pool.query('UPDATE public.instagram_connections SET last_synced_at=now() WHERE id=$1', [connection.id]);
+      console.log('Synced Instagram insights for ' + connection.ig_user_id);
+    } catch (error) {
+      console.error('Instagram insights sync failed for ' + connection.ig_user_id + ':', error.message);
+    }
+  }
+}
+
 app.get('/api/health', async function (req, res) {
   let database = false;
   if (pool) {
@@ -189,6 +237,43 @@ app.get('/api/dashboard', async function (req, res) {
     return json(res, 200, { start: start, end: end, previousStart: previousStart, previousEnd: previousEnd, brands: brands, totals: totals, note: 'Data dihitung dari akun Meta yang sudah tersambung. Pengunjung website perlu integrasi GA4.' });
   } catch (error) { console.error(error); return json(res, 500, { error: 'Gagal memuat metrik dashboard.' }); }
 });
+
+app.get('/api/social', async function (req, res) {
+  try {
+    if (!pool) return json(res, 503, { error: 'Database Neon belum dikonfigurasi' });
+    try {
+      const user = await currentUser(req);
+      if (user && (await ensureProfile(user)).role === 'admin') await syncInstagramConnections();
+    } catch (syncError) { console.error('Instagram sync check failed:', syncError.message); }
+    const end = req.query.end;
+    const start = req.query.start;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(start || '') || !/^\d{4}-\d{2}-\d{2}$/.test(end || '') || start > end)
+      return json(res, 400, { error: 'start dan end harus tanggal YYYY-MM-DD yang valid' });
+    const result = await pool.query(
+      "SELECT b.id,b.name,COALESCE(bool_or(c.id IS NOT NULL),false) AS connected, " +
+      "CASE WHEN COUNT(m.id)>0 THEN SUM(m.reach)::bigint ELSE NULL END AS reach, " +
+      "CASE WHEN COUNT(m.id)>0 THEN SUM(m.interactions)::bigint ELSE NULL END AS interactions, " +
+      "CASE WHEN COUNT(m.id)>0 AND SUM(m.reach)>0 THEN 100.0*SUM(m.interactions)/SUM(m.reach) ELSE NULL END AS engagement_pct, " +
+      "MAX(c.ig_username) AS instagram_username,MAX(c.last_synced_at) AS last_synced_at " +
+      "FROM public.brands b LEFT JOIN public.instagram_connections c ON c.brand_id=b.id " +
+      "LEFT JOIN public.instagram_daily_metrics m ON m.connection_id=c.id AND m.day BETWEEN $1::date AND $2::date " +
+      "GROUP BY b.id ORDER BY b.created_at",
+      [start, end]
+    );
+    const brands = result.rows.map(function (row) {
+      return Object.assign({}, row, {
+        reach: row.reach === null ? null : Number(row.reach),
+        interactions: row.interactions === null ? null : Number(row.interactions),
+        engagement_pct: row.engagement_pct === null ? null : Number(row.engagement_pct)
+      });
+    });
+    return json(res, 200, { start: start, end: end, brands: brands });
+  } catch (error) {
+    console.error('Instagram social metrics failed:', error);
+    return json(res, 500, { error: 'Gagal memuat insight Instagram.' });
+  }
+});
+
 app.post('/api/brands', admin, async function (req, res) {
   const name = String(req.body.name || '').trim();
   const shortName = String(req.body.short_name || '').trim().slice(0, 3).toUpperCase();
@@ -213,6 +298,29 @@ app.delete('/api/brands/:id', admin, async function (req, res) {
     return result.rowCount ? res.sendStatus(204) : json(res, 404, { error: 'Brand tidak ditemukan.' });
   } catch (error) { return json(res, 400, { error: 'Brand gagal dihapus.' }); }
 });
+
+app.get('/api/instagram/connect/:brandId', admin, async function (req, res) {
+  try {
+    if (!process.env.META_APP_ID || !process.env.META_APP_SECRET || !graph || !process.env.META_OAUTH_REDIRECT_URI)
+      return json(res, 503, { error: 'Meta App belum dikonfigurasi di Render.' });
+    const exists = await pool.query('SELECT 1 FROM public.brands WHERE id=$1', [req.params.brandId]);
+    if (!exists.rowCount) return json(res, 404, { error: 'Brand tidak ditemukan.' });
+    const stateId = crypto.randomBytes(20).toString('hex');
+    const payload = Buffer.from(JSON.stringify({ brandId: req.params.brandId, userId: req.user.id, stateId: stateId, integration: 'instagram', exp: Date.now() + 600000 })).toString('base64url');
+    const sig = crypto.createHmac('sha256', process.env.META_APP_SECRET).update(payload).digest('base64url');
+    const redirect = new URL('https://www.facebook.com/' + graph + '/dialog/oauth');
+    redirect.searchParams.set('client_id', process.env.META_APP_ID);
+    redirect.searchParams.set('redirect_uri', process.env.META_OAUTH_REDIRECT_URI);
+    redirect.searchParams.set('state', payload + '.' + sig);
+    redirect.searchParams.set('scope', 'instagram_basic,instagram_manage_insights,pages_show_list,pages_read_engagement,ads_read');
+    redirect.searchParams.set('response_type', 'code');
+    return json(res, 200, { url: redirect.toString() });
+  } catch (error) {
+    console.error('Instagram OAuth start failed:', error);
+    return json(res, 500, { error: 'Tidak bisa memulai koneksi Instagram.' });
+  }
+});
+
 app.get('/api/meta/connect/:brandId', admin, async function (req, res) {
   try {
     if (!process.env.META_APP_ID || !process.env.META_APP_SECRET || !graph || !process.env.META_OAUTH_REDIRECT_URI)
@@ -250,6 +358,32 @@ app.get('/api/meta/callback', async function (req, res) {
       token = long.access_token;
       expires = long.expires_in ? new Date(Date.now() + long.expires_in * 1000).toISOString() : expires;
     } catch (error) {}
+
+    if (state.integration === 'instagram') {
+      const pageData = await graphGet('https://graph.facebook.com/' + graph + '/me/accounts', {
+        fields: 'id,name,instagram_business_account{id,username}',
+        limit: 200,
+        access_token: token
+      });
+      const accounts = [];
+      for (const page of pageData.data || []) {
+        const ig = page.instagram_business_account;
+        if (!ig || !ig.id) continue;
+        accounts.push({
+          id: String(ig.id),
+          username: String(ig.username || ig.id),
+          page_id: String(page.id),
+          page_name: String(page.name || page.id)
+        });
+      }
+      if (!accounts.length) return res.status(400).send('Tidak ada akun Instagram Professional yang terhubung ke Facebook Page yang dapat diakses. Pastikan akun IG terhubung ke Page dan berikan izin yang diminta.');
+      await pool.query("INSERT INTO public.meta_oauth_pending (state_id,brand_id,connected_by,encrypted_access_token,token_expires_at,accounts,expires_at) VALUES ($1,$2,$3,$4,$5,$6::jsonb,now()+interval '10 minutes')", [state.stateId, state.brandId, state.userId, encrypt(token), expires, JSON.stringify(accounts)]);
+      const options = accounts.map(function (account) {
+        return '<option value="' + htmlEscape(account.id) + '">' + htmlEscape('@' + account.username + ' — ' + account.page_name) + '</option>';
+      }).join('');
+      return res.type('html').send('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Pilih Instagram</title><style>body{font:16px system-ui;background:#0b1018;color:#eee;max-width:600px;margin:10vh auto;padding:24px}select,button{padding:12px;width:100%;margin-top:16px;border-radius:8px}</style><h1>Pilih akun Instagram</h1><p>Akun terpilih akan ditautkan ke brand yang dipilih.</p><form method="post" action="/api/instagram/select"><input type="hidden" name="state" value="' + htmlEscape(state.stateId) + '"><select name="accountId" required>' + options + '</select><button>Simpan koneksi</button></form>');
+    }
+
     const accountData = await graphGet('https://graph.facebook.com/' + graph + '/me/adaccounts', { fields: 'id,name,account_id', limit: 200, access_token: token });
     const accounts = accountData.data || [];
     if (!accounts.length) return res.status(400).send('Tidak ada ad account yang dapat diakses. Pastikan akun Anda diberi akses di Meta Business.');
@@ -282,6 +416,31 @@ app.post('/api/meta/select', async function (req, res) {
     await client.query('ROLLBACK');
     console.error(error);
     return res.status(500).send('Gagal menyimpan koneksi Meta.');
+  } finally { client.release(); }
+});
+
+
+app.post('/api/instagram/select', async function (req, res) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const query = await client.query("SELECT * FROM public.meta_oauth_pending WHERE state_id=$1 AND expires_at>now() FOR UPDATE", [req.body.state]);
+    const pending = query.rows[0];
+    if (!pending) { await client.query('ROLLBACK'); return res.status(400).send('Sesi pemilihan Instagram sudah kedaluwarsa. Sambungkan kembali.'); }
+    const account = (pending.accounts || []).find(function (item) { return item.id === String(req.body.accountId); });
+    if (!account) { await client.query('ROLLBACK'); return res.status(400).send('Akun Instagram tidak valid.'); }
+    await client.query(
+      "INSERT INTO public.instagram_connections (brand_id,ig_user_id,ig_username,page_id,page_name,encrypted_access_token,token_expires_at,connected_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (brand_id,ig_user_id) DO UPDATE SET ig_username=EXCLUDED.ig_username,page_id=EXCLUDED.page_id,page_name=EXCLUDED.page_name,encrypted_access_token=EXCLUDED.encrypted_access_token,token_expires_at=EXCLUDED.token_expires_at,connected_by=EXCLUDED.connected_by,last_synced_at=NULL",
+      [pending.brand_id, account.id, account.username, account.page_id, account.page_name, pending.encrypted_access_token, pending.token_expires_at, pending.connected_by]
+    );
+    await client.query('DELETE FROM public.meta_oauth_pending WHERE state_id=$1', [req.body.state]);
+    await client.query('COMMIT');
+    const origin = String(process.env.APP_ORIGIN || '/').replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+    return res.type('html').send('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Instagram tersambung</title><style>body{font:16px system-ui;background:#0b1018;color:#eee;max-width:600px;margin:10vh auto;padding:24px}a{color:#c4f36b}</style><h2>Akun Instagram berhasil tersambung.</h2><p>Tutup halaman ini atau kembali ke dashboard untuk memuat insight.</p><p><a href="' + origin + '">Kembali ke dashboard</a></p>');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Instagram connection save failed:', error);
+    return res.status(500).send('Gagal menyimpan koneksi Instagram.');
   } finally { client.release(); }
 });
 
