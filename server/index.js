@@ -278,7 +278,7 @@ app.get('/api/social', async function (req, res) {
     } catch (syncError) { console.error('Instagram sync check failed:', syncError.message); }
     const end = req.query.end;
     const start = req.query.start;
-    if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(start || '') || !/^\\d{4}-\\d{2}-\\d{2}$/.test(end || '') || start > end)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(start || '') || !/^\d{4}-\d{2}-\d{2}$/.test(end || '') || start > end)
       return json(res, 400, { error: 'start dan end harus tanggal YYYY-MM-DD yang valid' });
     const result = await pool.query(
       "SELECT b.id,b.name,b.short_name,COALESCE(bool_or(c.id IS NOT NULL),false) AS connected, " +
