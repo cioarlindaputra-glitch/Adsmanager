@@ -366,20 +366,18 @@ app.delete('/api/brands/:id', admin, async function (req, res) {
 
 app.get('/api/instagram/connect/:brandId', admin, async function (req, res) {
   try {
-    if (!process.env.INSTAGRAM_APP_ID || !process.env.INSTAGRAM_APP_SECRET || !graph || !process.env.META_OAUTH_REDIRECT_URI)
-      return json(res, 503, { error: 'Login Instagram langsung belum dikonfigurasi. Tambahkan INSTAGRAM_APP_ID dan INSTAGRAM_APP_SECRET dari pengaturan Instagram di Meta App ke Render.' });
+    if (!process.env.META_APP_ID || !process.env.META_APP_SECRET || !process.env.INSTAGRAM_UNIFIED_CONFIG_ID || !graph || !process.env.META_OAUTH_REDIRECT_URI)
+      return json(res, 503, { error: 'Instagram Unified Login belum dikonfigurasi. Pastikan INSTAGRAM_UNIFIED_CONFIG_ID tersedia di Render.' });
     const exists = await pool.query('SELECT 1 FROM public.social_brands WHERE id=$1', [req.params.brandId]);
     if (!exists.rowCount) return json(res, 404, { error: 'Brand sosial tidak ditemukan.' });
     const stateId = crypto.randomBytes(20).toString('hex');
-    const payload = Buffer.from(JSON.stringify({ socialBrandId: req.params.brandId, userId: req.user.id, stateId: stateId, integration: 'instagram_direct', exp: Date.now() + 600000 })).toString('base64url');
+    const payload = Buffer.from(JSON.stringify({ socialBrandId: req.params.brandId, userId: req.user.id, stateId: stateId, integration: 'instagram_unified', exp: Date.now() + 600000 })).toString('base64url');
     const sig = crypto.createHmac('sha256', process.env.META_APP_SECRET).update(payload).digest('base64url');
-    const redirect = new URL('https://www.instagram.com/oauth/authorize');
-    redirect.searchParams.set('client_id', process.env.INSTAGRAM_APP_ID);
+    const redirect = new URL('https://www.facebook.com/' + graph + '/dialog/oauth');
+    redirect.searchParams.set('client_id', process.env.META_APP_ID);
     redirect.searchParams.set('redirect_uri', process.env.META_OAUTH_REDIRECT_URI);
     redirect.searchParams.set('state', payload + '.' + sig);
-    redirect.searchParams.set('scope', 'instagram_business_basic,instagram_business_manage_insights');
-    redirect.searchParams.set('enable_fb_login', 'false');
-    redirect.searchParams.set('force_reauth', 'true');
+    redirect.searchParams.set('config_id', process.env.INSTAGRAM_UNIFIED_CONFIG_ID);
     redirect.searchParams.set('response_type', 'code');
     return json(res, 200, { url: redirect.toString() });
   } catch (error) {
@@ -417,6 +415,30 @@ app.get('/api/meta/callback', async function (req, res) {
     if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) return res.status(400).send('State OAuth tidak valid. Silakan mulai lagi.');
     const state = JSON.parse(Buffer.from(payload, 'base64url').toString());
     if (state.exp < Date.now() || !req.query.code) return res.status(400).send('Sesi OAuth kedaluwarsa. Silakan mulai lagi.');
+    if (state.integration === 'instagram_unified') {
+      try {
+        const tokenData = await graphGet('https://graph.facebook.com/' + graph + '/oauth/access_token', {
+          client_id: process.env.META_APP_ID, client_secret: process.env.META_APP_SECRET, code: String(req.query.code)
+        });
+        if (!tokenData.access_token) throw Error('Meta tidak mengembalikan access token.');
+        const token = tokenData.access_token;
+        const accountData = await graphGet('https://graph.facebook.com/' + graph + '/me/assigned_instagram_accounts', {
+          fields: 'id,username,account_type', access_token: token, limit: 200
+        });
+        const accounts = (accountData.data || []).map(function (account) {
+          return { id: String(account.id), username: String(account.username || account.id), account_type: String(account.account_type || 'PROFESSIONAL'), page_id: '', page_name: '', auth_provider: 'unified' };
+        });
+        if (!accounts.length) return res.status(400).send('Tidak ada akun Instagram yang diberikan ke konfigurasi ini. Periksa Business Portfolio dan aset Instagram yang dipilih.');
+        await pool.query("INSERT INTO public.meta_oauth_pending (state_id,brand_id,social_brand_id,connected_by,encrypted_access_token,token_expires_at,accounts,expires_at) VALUES ($1,NULL,$2,$3,$4,NULL,$5::jsonb,now()+interval '10 minutes')", [state.stateId, state.socialBrandId, state.userId, encrypt(token), JSON.stringify(accounts)]);
+        const options = accounts.map(function (account) {
+          return '<option value="' + htmlEscape(account.id) + '">' + htmlEscape('@' + account.username) + '</option>';
+        }).join('');
+        return res.type('html').send('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Pilih Instagram</title><style>body{font:16px system-ui;background:#0b1018;color:#eee;max-width:600px;margin:10vh auto;padding:24px}select,button{padding:12px;width:100%;margin-top:16px;border-radius:8px}</style><h1>Pilih akun Instagram</h1><p>Akun terpilih akan ditautkan ke brand yang dipilih.</p><form method="post" action="/api/instagram/select"><input type="hidden" name="state" value="' + htmlEscape(state.stateId) + '"><select name="accountId" required>' + options + '</select><button>Simpan koneksi</button></form>');
+      } catch (error) {
+        console.error('Instagram Unified Login callback failed:', error.message);
+        return res.status(400).send('Koneksi Instagram gagal. Pastikan konfigurasi Unified Login, redirect URI, dan izin Instagram sudah sesuai.');
+      }
+    }
     if (state.integration === 'instagram_direct') {
       try {
         const page = await completeInstagramDirectOAuth(state, String(req.query.code));
@@ -506,8 +528,8 @@ app.post('/api/instagram/select', async function (req, res) {
     const account = (pending.accounts || []).find(function (item) { return item.id === String(req.body.accountId); });
     if (!account) { await client.query('ROLLBACK'); return res.status(400).send('Akun Instagram tidak valid.'); }
     await client.query(
-      "INSERT INTO public.instagram_connections (brand_id,social_brand_id,ig_user_id,ig_username,page_id,page_name,encrypted_access_token,token_expires_at,connected_by) VALUES (NULL,$1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (social_brand_id,ig_user_id) DO UPDATE SET ig_username=EXCLUDED.ig_username,page_id=EXCLUDED.page_id,page_name=EXCLUDED.page_name,encrypted_access_token=EXCLUDED.encrypted_access_token,token_expires_at=EXCLUDED.token_expires_at,connected_by=EXCLUDED.connected_by,last_synced_at=NULL",
-      [pending.social_brand_id, account.id, account.username, account.page_id, account.page_name, pending.encrypted_access_token, pending.token_expires_at, pending.connected_by]
+      "INSERT INTO public.instagram_connections (brand_id,social_brand_id,ig_user_id,ig_username,page_id,page_name,encrypted_access_token,token_expires_at,connected_by,auth_provider) VALUES (NULL,$1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (social_brand_id,ig_user_id) DO UPDATE SET ig_username=EXCLUDED.ig_username,page_id=EXCLUDED.page_id,page_name=EXCLUDED.page_name,encrypted_access_token=EXCLUDED.encrypted_access_token,token_expires_at=EXCLUDED.token_expires_at,connected_by=EXCLUDED.connected_by,auth_provider=EXCLUDED.auth_provider,last_synced_at=NULL",
+      [pending.social_brand_id, account.id, account.username, account.page_id || '', account.page_name || '', pending.encrypted_access_token, pending.token_expires_at, pending.connected_by, account.auth_provider || 'facebook']
     );
     await client.query('DELETE FROM public.meta_oauth_pending WHERE state_id=$1', [req.body.state]);
     await client.query('COMMIT');
