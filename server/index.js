@@ -238,6 +238,37 @@ app.get('/api/dashboard', async function (req, res) {
   } catch (error) { console.error(error); return json(res, 500, { error: 'Gagal memuat metrik dashboard.' }); }
 });
 
+app.get('/api/social-brands', async function (req, res) {
+  try {
+    if (!pool) return json(res, 503, { error: 'Database Neon belum dikonfigurasi' });
+    const result = await pool.query('SELECT id,name,short_name,created_at FROM public.social_brands ORDER BY created_at');
+    return json(res, 200, { brands: result.rows });
+  } catch (error) { console.error(error); return json(res, 500, { error: 'Gagal memuat brand sosial.' }); }
+});
+app.post('/api/social-brands', admin, async function (req, res) {
+  const name = String(req.body.name || '').trim();
+  const shortName = String(req.body.short_name || name.slice(0, 3)).trim().slice(0, 3).toUpperCase();
+  if (!name) return json(res, 400, { error: 'Nama brand sosial wajib diisi.' });
+  try {
+    const result = await pool.query('INSERT INTO public.social_brands (name,short_name,created_by) VALUES ($1,$2,$3) RETURNING id,name,short_name', [name, shortName, req.user.id]);
+    return json(res, 201, { brand: result.rows[0] });
+  } catch (error) { return json(res, 400, { error: 'Brand sosial gagal ditambahkan.' }); }
+});
+app.patch('/api/social-brands/:id', admin, async function (req, res) {
+  const name = String(req.body.name || '').trim();
+  const shortName = String(req.body.short_name || name.slice(0, 3)).trim().slice(0, 3).toUpperCase();
+  if (!name) return json(res, 400, { error: 'Nama brand sosial wajib diisi.' });
+  try {
+    const result = await pool.query('UPDATE public.social_brands SET name=$1,short_name=$2,updated_at=now() WHERE id=$3 RETURNING id,name,short_name', [name, shortName, req.params.id]);
+    return result.rows[0] ? json(res, 200, { brand: result.rows[0] }) : json(res, 404, { error: 'Brand sosial tidak ditemukan.' });
+  } catch (error) { return json(res, 400, { error: 'Brand sosial gagal diperbarui.' }); }
+});
+app.delete('/api/social-brands/:id', admin, async function (req, res) {
+  try {
+    const result = await pool.query('DELETE FROM public.social_brands WHERE id=$1', [req.params.id]);
+    return result.rowCount ? res.sendStatus(204) : json(res, 404, { error: 'Brand sosial tidak ditemukan.' });
+  } catch (error) { return json(res, 400, { error: 'Brand sosial gagal dihapus.' }); }
+});
 app.get('/api/social', async function (req, res) {
   try {
     if (!pool) return json(res, 503, { error: 'Database Neon belum dikonfigurasi' });
@@ -247,15 +278,15 @@ app.get('/api/social', async function (req, res) {
     } catch (syncError) { console.error('Instagram sync check failed:', syncError.message); }
     const end = req.query.end;
     const start = req.query.start;
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(start || '') || !/^\d{4}-\d{2}-\d{2}$/.test(end || '') || start > end)
+    if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(start || '') || !/^\\d{4}-\\d{2}-\\d{2}$/.test(end || '') || start > end)
       return json(res, 400, { error: 'start dan end harus tanggal YYYY-MM-DD yang valid' });
     const result = await pool.query(
-      "SELECT b.id,b.name,COALESCE(bool_or(c.id IS NOT NULL),false) AS connected, " +
+      "SELECT b.id,b.name,b.short_name,COALESCE(bool_or(c.id IS NOT NULL),false) AS connected, " +
       "CASE WHEN COUNT(m.id)>0 THEN SUM(m.reach)::bigint ELSE NULL END AS reach, " +
       "CASE WHEN COUNT(m.id)>0 THEN SUM(m.interactions)::bigint ELSE NULL END AS interactions, " +
       "CASE WHEN COUNT(m.id)>0 AND SUM(m.reach)>0 THEN 100.0*SUM(m.interactions)/SUM(m.reach) ELSE NULL END AS engagement_pct, " +
       "MAX(c.ig_username) AS instagram_username,MAX(c.last_synced_at) AS last_synced_at " +
-      "FROM public.brands b LEFT JOIN public.instagram_connections c ON c.brand_id=b.id " +
+      "FROM public.social_brands b LEFT JOIN public.instagram_connections c ON c.social_brand_id=b.id " +
       "LEFT JOIN public.instagram_daily_metrics m ON m.connection_id=c.id AND m.day BETWEEN $1::date AND $2::date " +
       "GROUP BY b.id ORDER BY b.created_at",
       [start, end]
@@ -303,16 +334,16 @@ app.get('/api/instagram/connect/:brandId', admin, async function (req, res) {
   try {
     if (!process.env.META_APP_ID || !process.env.META_APP_SECRET || !graph || !process.env.META_OAUTH_REDIRECT_URI)
       return json(res, 503, { error: 'Meta App belum dikonfigurasi di Render.' });
-    const exists = await pool.query('SELECT 1 FROM public.brands WHERE id=$1', [req.params.brandId]);
-    if (!exists.rowCount) return json(res, 404, { error: 'Brand tidak ditemukan.' });
+    const exists = await pool.query('SELECT 1 FROM public.social_brands WHERE id=$1', [req.params.brandId]);
+    if (!exists.rowCount) return json(res, 404, { error: 'Brand sosial tidak ditemukan.' });
     const stateId = crypto.randomBytes(20).toString('hex');
-    const payload = Buffer.from(JSON.stringify({ brandId: req.params.brandId, userId: req.user.id, stateId: stateId, integration: 'instagram', exp: Date.now() + 600000 })).toString('base64url');
+    const payload = Buffer.from(JSON.stringify({ socialBrandId: req.params.brandId, userId: req.user.id, stateId: stateId, integration: 'instagram', exp: Date.now() + 600000 })).toString('base64url');
     const sig = crypto.createHmac('sha256', process.env.META_APP_SECRET).update(payload).digest('base64url');
     const redirect = new URL('https://www.facebook.com/' + graph + '/dialog/oauth');
     redirect.searchParams.set('client_id', process.env.META_APP_ID);
     redirect.searchParams.set('redirect_uri', process.env.META_OAUTH_REDIRECT_URI);
     redirect.searchParams.set('state', payload + '.' + sig);
-    redirect.searchParams.set('scope', 'instagram_basic,instagram_manage_insights,pages_show_list,pages_read_engagement,ads_read');
+    redirect.searchParams.set('scope', 'instagram_basic,instagram_manage_insights,pages_show_list,pages_read_engagement');
     redirect.searchParams.set('response_type', 'code');
     return json(res, 200, { url: redirect.toString() });
   } catch (error) {
@@ -377,7 +408,7 @@ app.get('/api/meta/callback', async function (req, res) {
         });
       }
       if (!accounts.length) return res.status(400).send('Tidak ada akun Instagram Professional yang terhubung ke Facebook Page yang dapat diakses. Pastikan akun IG terhubung ke Page dan berikan izin yang diminta.');
-      await pool.query("INSERT INTO public.meta_oauth_pending (state_id,brand_id,connected_by,encrypted_access_token,token_expires_at,accounts,expires_at) VALUES ($1,$2,$3,$4,$5,$6::jsonb,now()+interval '10 minutes')", [state.stateId, state.brandId, state.userId, encrypt(token), expires, JSON.stringify(accounts)]);
+      await pool.query("INSERT INTO public.meta_oauth_pending (state_id,brand_id,social_brand_id,connected_by,encrypted_access_token,token_expires_at,accounts,expires_at) VALUES ($1,NULL,$2,$3,$4,$5,$6::jsonb,now()+interval '10 minutes')", [state.stateId, state.socialBrandId, state.userId, encrypt(token), expires, JSON.stringify(accounts)]);
       const options = accounts.map(function (account) {
         return '<option value="' + htmlEscape(account.id) + '">' + htmlEscape('@' + account.username + ' — ' + account.page_name) + '</option>';
       }).join('');
@@ -430,8 +461,8 @@ app.post('/api/instagram/select', async function (req, res) {
     const account = (pending.accounts || []).find(function (item) { return item.id === String(req.body.accountId); });
     if (!account) { await client.query('ROLLBACK'); return res.status(400).send('Akun Instagram tidak valid.'); }
     await client.query(
-      "INSERT INTO public.instagram_connections (brand_id,ig_user_id,ig_username,page_id,page_name,encrypted_access_token,token_expires_at,connected_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (brand_id,ig_user_id) DO UPDATE SET ig_username=EXCLUDED.ig_username,page_id=EXCLUDED.page_id,page_name=EXCLUDED.page_name,encrypted_access_token=EXCLUDED.encrypted_access_token,token_expires_at=EXCLUDED.token_expires_at,connected_by=EXCLUDED.connected_by,last_synced_at=NULL",
-      [pending.brand_id, account.id, account.username, account.page_id, account.page_name, pending.encrypted_access_token, pending.token_expires_at, pending.connected_by]
+      "INSERT INTO public.instagram_connections (brand_id,social_brand_id,ig_user_id,ig_username,page_id,page_name,encrypted_access_token,token_expires_at,connected_by) VALUES (NULL,$1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (social_brand_id,ig_user_id) DO UPDATE SET ig_username=EXCLUDED.ig_username,page_id=EXCLUDED.page_id,page_name=EXCLUDED.page_name,encrypted_access_token=EXCLUDED.encrypted_access_token,token_expires_at=EXCLUDED.token_expires_at,connected_by=EXCLUDED.connected_by,last_synced_at=NULL",
+      [pending.social_brand_id, account.id, account.username, account.page_id, account.page_name, pending.encrypted_access_token, pending.token_expires_at, pending.connected_by]
     );
     await client.query('DELETE FROM public.meta_oauth_pending WHERE state_id=$1', [req.body.state]);
     await client.query('COMMIT');
