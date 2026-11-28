@@ -169,8 +169,9 @@ async function syncInstagramConnections() {
   nextInstagramSyncAt = Date.now() + 15 * 60 * 1000;
   await ensureInstagramMetricsSchema();
   const result = await pool.query("SELECT id,brand_id,ig_user_id,encrypted_access_token,auth_provider,token_expires_at FROM public.instagram_connections WHERE last_synced_at IS NULL OR last_synced_at < now()-interval '15 minutes'");
-  const untilDate = new Date().toISOString().slice(0, 10);
-  const sinceDate = new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
+  const now = new Date();
+  const untilDate = now.toISOString().slice(0, 10);
+  const sinceDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
   const since = Math.floor(Date.parse(sinceDate + 'T00:00:00Z') / 1000);
   const until = Math.floor(Date.parse(untilDate + 'T00:00:00Z') / 1000) + 86400;
   for (const connection of result.rows) {
@@ -198,7 +199,7 @@ async function syncInstagramConnections() {
             if (!byDay.has(day)) byDay.set(day, { reach: 0, interactions: 0, profile_links_taps: 0 });
             byDay.get(day)[column] = Number(point.value || 0);
           }
-          if (metric.total_value && metric.total_value.value !== undefined) {
+          if (!(metric.values || []).length && metric.total_value && metric.total_value.value !== undefined) {
             if (!byDay.has(sinceDate)) byDay.set(sinceDate, { reach: 0, interactions: 0, profile_links_taps: 0 });
             byDay.get(sinceDate)[column] = Number(metric.total_value.value || 0);
           }
