@@ -155,10 +155,19 @@ async function syncStaleMetaConnections() {
 }
 
 
+let instagramMetricsSchemaReady;
+async function ensureInstagramMetricsSchema() {
+  if (!instagramMetricsSchemaReady) {
+    instagramMetricsSchemaReady = pool.query('ALTER TABLE public.instagram_daily_metrics ADD COLUMN IF NOT EXISTS profile_links_taps bigint NOT NULL DEFAULT 0');
+  }
+  return instagramMetricsSchemaReady;
+}
+
 let nextInstagramSyncAt = 0;
 async function syncInstagramConnections() {
   if (!pool || !tokenKey || Date.now() < nextInstagramSyncAt) return;
   nextInstagramSyncAt = Date.now() + 15 * 60 * 1000;
+  await ensureInstagramMetricsSchema();
   const result = await pool.query("SELECT id,brand_id,ig_user_id,encrypted_access_token,auth_provider,token_expires_at FROM public.instagram_connections WHERE last_synced_at IS NULL OR last_synced_at < now()-interval '15 minutes'");
   const untilDate = new Date().toISOString().slice(0, 10);
   const sinceDate = new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
@@ -175,25 +184,30 @@ async function syncInstagramConnections() {
       }
       const host = connection.auth_provider === 'instagram' ? 'https://graph.instagram.com/' : 'https://graph.facebook.com/';
       const byDay = new Map();
-      for (const metricName of ['reach', 'total_interactions']) {
+      for (const metricName of ['reach', 'total_interactions', 'profile_links_taps']) {
         const insightParams = {
           metric: metricName, period: 'day', since: since, until: until, access_token: accessToken
         };
-        if (metricName === 'total_interactions') insightParams.metric_type = 'total_value';
+        if (metricName !== 'reach') insightParams.metric_type = 'total_value';
         const body = await graphGet(host + graph + '/' + connection.ig_user_id + '/insights', insightParams);
         for (const metric of body.data || []) {
-          const column = metric.name === 'reach' ? 'reach' : 'interactions';
+          const column = metric.name === 'reach' ? 'reach' : metric.name === 'total_interactions' ? 'interactions' : metric.name === 'profile_links_taps' ? 'profile_links_taps' : null;
+          if (!column) continue;
           for (const point of metric.values || []) {
             const day = point.end_time ? new Date(point.end_time).toISOString().slice(0, 10) : untilDate;
-            if (!byDay.has(day)) byDay.set(day, { reach: 0, interactions: 0 });
+            if (!byDay.has(day)) byDay.set(day, { reach: 0, interactions: 0, profile_links_taps: 0 });
             byDay.get(day)[column] = Number(point.value || 0);
+          }
+          if (metric.total_value && metric.total_value.value !== undefined) {
+            if (!byDay.has(sinceDate)) byDay.set(sinceDate, { reach: 0, interactions: 0, profile_links_taps: 0 });
+            byDay.get(sinceDate)[column] = Number(metric.total_value.value || 0);
           }
         }
       }
       for (const [day, values] of byDay) {
         await pool.query(
-          'INSERT INTO public.instagram_daily_metrics (brand_id,connection_id,day,reach,interactions,fetched_at) VALUES ($1,$2,$3,$4,$5,now()) ON CONFLICT (connection_id,day) DO UPDATE SET reach=EXCLUDED.reach,interactions=EXCLUDED.interactions,fetched_at=now()',
-          [connection.brand_id, connection.id, day, values.reach, values.interactions]
+          'INSERT INTO public.instagram_daily_metrics (brand_id,connection_id,day,reach,interactions,profile_links_taps,fetched_at) VALUES ($1,$2,$3,$4,$5,$6,now()) ON CONFLICT (connection_id,day) DO UPDATE SET reach=EXCLUDED.reach,interactions=EXCLUDED.interactions,profile_links_taps=EXCLUDED.profile_links_taps,fetched_at=now()',
+          [connection.brand_id, connection.id, day, values.reach, values.interactions, values.profile_links_taps]
         );
       }
       await pool.query('UPDATE public.instagram_connections SET last_synced_at=now() WHERE id=$1', [connection.id]);
@@ -320,6 +334,7 @@ app.get('/api/social', async function (req, res) {
       "SELECT b.id,b.name,b.short_name,COALESCE(bool_or(c.id IS NOT NULL),false) AS connected, " +
       "CASE WHEN COUNT(m.id)>0 THEN SUM(m.reach)::bigint ELSE NULL END AS reach, " +
       "CASE WHEN COUNT(m.id)>0 THEN SUM(m.interactions)::bigint ELSE NULL END AS interactions, " +
+      "CASE WHEN COUNT(m.id)>0 THEN SUM(m.profile_links_taps)::bigint ELSE NULL END AS profile_links_taps, " +
       "CASE WHEN COUNT(m.id)>0 AND SUM(m.reach)>0 THEN 100.0*SUM(m.interactions)/SUM(m.reach) ELSE NULL END AS engagement_pct, " +
       "MAX(c.ig_username) AS instagram_username,MAX(c.last_synced_at) AS last_synced_at " +
       "FROM public.social_brands b LEFT JOIN public.instagram_connections c ON c.social_brand_id=b.id " +
@@ -331,6 +346,7 @@ app.get('/api/social', async function (req, res) {
       return Object.assign({}, row, {
         reach: row.reach === null ? null : Number(row.reach),
         interactions: row.interactions === null ? null : Number(row.interactions),
+        profile_links_taps: row.profile_links_taps === null ? null : Number(row.profile_links_taps),
         engagement_pct: row.engagement_pct === null ? null : Number(row.engagement_pct)
       });
     });
