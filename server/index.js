@@ -94,8 +94,8 @@ async function instagramTokenPost(fields) {
   return Array.isArray(data.data) ? data.data[0] : data;
 }
 async function completeInstagramDirectOAuth(state, code) {
-  const appId = process.env.INSTAGRAM_APP_ID;
-  const appSecret = process.env.INSTAGRAM_APP_SECRET;
+  const appId = process.env.INSTAGRAM_APP_ID || process.env.META_APP_ID;
+  const appSecret = process.env.INSTAGRAM_APP_SECRET || process.env.META_APP_SECRET;
   const redirectUri = process.env.META_OAUTH_REDIRECT_URI;
   const shortToken = await instagramTokenPost({ client_id: appId, client_secret: appSecret, grant_type: 'authorization_code', redirect_uri: redirectUri, code: code });
   if (!shortToken || !shortToken.access_token) throw Error('Instagram tidak mengembalikan access token.');
@@ -366,19 +366,23 @@ app.delete('/api/brands/:id', admin, async function (req, res) {
 
 app.get('/api/instagram/connect/:brandId', admin, async function (req, res) {
   try {
-    if (!process.env.META_APP_ID || !process.env.META_APP_SECRET || !process.env.INSTAGRAM_UNIFIED_CONFIG_ID || !graph || !process.env.META_OAUTH_REDIRECT_URI)
-      return json(res, 503, { error: 'Instagram Unified Login belum dikonfigurasi. Pastikan INSTAGRAM_UNIFIED_CONFIG_ID tersedia di Render.' });
+    const instagramAppId = process.env.INSTAGRAM_APP_ID || process.env.META_APP_ID;
+    const instagramAppSecret = process.env.INSTAGRAM_APP_SECRET || process.env.META_APP_SECRET;
+    if (!instagramAppId || !instagramAppSecret || !graph || !process.env.META_OAUTH_REDIRECT_URI)
+      return json(res, 503, { error: 'Instagram Login belum dikonfigurasi. Pastikan App ID, App Secret, Graph API version, dan Redirect URI tersedia di Render.' });
     const exists = await pool.query('SELECT 1 FROM public.social_brands WHERE id=$1', [req.params.brandId]);
     if (!exists.rowCount) return json(res, 404, { error: 'Brand sosial tidak ditemukan.' });
     const stateId = crypto.randomBytes(20).toString('hex');
-    const payload = Buffer.from(JSON.stringify({ socialBrandId: req.params.brandId, userId: req.user.id, stateId: stateId, integration: 'instagram_unified', exp: Date.now() + 600000 })).toString('base64url');
-    const sig = crypto.createHmac('sha256', process.env.META_APP_SECRET).update(payload).digest('base64url');
-    const redirect = new URL('https://www.facebook.com/' + graph + '/dialog/oauth');
-    redirect.searchParams.set('client_id', process.env.META_APP_ID);
+    const payload = Buffer.from(JSON.stringify({ socialBrandId: req.params.brandId, userId: req.user.id, stateId: stateId, integration: 'instagram_direct', exp: Date.now() + 600000 })).toString('base64url');
+    const sig = crypto.createHmac('sha256', process.env.META_APP_SECRET || instagramAppSecret).update(payload).digest('base64url');
+    const redirect = new URL('https://www.instagram.com/oauth/authorize');
+    redirect.searchParams.set('client_id', instagramAppId);
     redirect.searchParams.set('redirect_uri', process.env.META_OAUTH_REDIRECT_URI);
     redirect.searchParams.set('state', payload + '.' + sig);
-    redirect.searchParams.set('config_id', process.env.INSTAGRAM_UNIFIED_CONFIG_ID);
     redirect.searchParams.set('response_type', 'code');
+    redirect.searchParams.set('scope', 'instagram_business_basic,instagram_business_manage_insights');
+    redirect.searchParams.set('enable_fb_login', '0');
+    redirect.searchParams.set('force_authentication', '1');
     return json(res, 200, { url: redirect.toString() });
   } catch (error) {
     console.error('Instagram OAuth start failed:', error);
@@ -410,7 +414,7 @@ app.get('/api/meta/callback', async function (req, res) {
     const parts = String(req.query.state || '').split('.');
     if (!parts[0] || !parts[1]) return res.status(400).send('State OAuth tidak valid. Silakan mulai lagi.');
     const payload = parts[0], sig = parts[1];
-    const expected = crypto.createHmac('sha256', process.env.META_APP_SECRET || '').update(payload).digest();
+    const expected = crypto.createHmac('sha256', process.env.META_APP_SECRET || process.env.INSTAGRAM_APP_SECRET || '').update(payload).digest();
     const actual = Buffer.from(sig, 'base64url');
     if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) return res.status(400).send('State OAuth tidak valid. Silakan mulai lagi.');
     const state = JSON.parse(Buffer.from(payload, 'base64url').toString());
