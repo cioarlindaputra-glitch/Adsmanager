@@ -176,9 +176,11 @@ async function syncInstagramConnections() {
       const host = connection.auth_provider === 'instagram' ? 'https://graph.instagram.com/' : 'https://graph.facebook.com/';
       const byDay = new Map();
       for (const metricName of ['reach', 'total_interactions']) {
-        const body = await graphGet(host + graph + '/' + connection.ig_user_id + '/insights', {
+        const insightParams = {
           metric: metricName, period: 'day', since: since, until: until, access_token: accessToken
-        });
+        };
+        if (metricName === 'total_interactions') insightParams.metric_type = 'total_value';
+        const body = await graphGet(host + graph + '/' + connection.ig_user_id + '/insights', insightParams);
         for (const metric of body.data || []) {
           const column = metric.name === 'reach' ? 'reach' : 'interactions';
           for (const point of metric.values || []) {
